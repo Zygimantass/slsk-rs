@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use slsk_rs::peer::{SearchResultFile, SharedDirectory};
 use tokio::sync::mpsc;
 
-use crate::spotify::{SoulseekPlaylist, SpotifyClient, SpotifyResource};
+use crate::spotify::{MatchedFile, SoulseekPlaylist, SpotifyClient, SpotifyResource};
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -38,21 +38,45 @@ pub struct Download {
 #[derive(Debug)]
 pub enum AppEvent {
     Connected,
-    LoginSuccess { username: String },
-    LoginFailed { reason: String },
+    LoginSuccess {
+        username: String,
+    },
+    LoginFailed {
+        reason: String,
+    },
     SearchResult(SearchResult),
     UserFiles(String, Vec<SharedDirectory>),
     StatusMessage(String),
     Error(String),
-    DownloadQueued { id: u32, username: String, filename: String, size: u64 },
-    DownloadStarted { id: u32 },
-    DownloadProgress { id: u32, downloaded: u64 },
-    DownloadCompleted { id: u32 },
-    DownloadFailed { id: u32, reason: String },
+    DownloadQueued {
+        id: u32,
+        username: String,
+        filename: String,
+        size: u64,
+    },
+    DownloadStarted {
+        id: u32,
+    },
+    DownloadProgress {
+        id: u32,
+        downloaded: u64,
+    },
+    DownloadCompleted {
+        id: u32,
+    },
+    DownloadFailed {
+        id: u32,
+        reason: String,
+    },
     SpotifyLoaded(SoulseekPlaylist),
     SpotifyError(String),
-    SpotifyTrackSearching { track_index: usize },
-    SpotifyTrackMatched { track_index: usize },
+    SpotifyTrackSearching {
+        track_index: usize,
+    },
+    SpotifyTrackMatched {
+        track_index: usize,
+        matched_file: MatchedFile,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -60,10 +84,19 @@ pub enum ClientCommand {
     Search(String),
     #[allow(dead_code)]
     BrowseUser(String),
-    DownloadFile { username: String, filename: String, size: u64 },
+    DownloadFile {
+        username: String,
+        filename: String,
+        size: u64,
+    },
     FetchSpotify(String),
-    SearchSpotifyTrack { track_index: usize, query: String },
-    DownloadSpotifyTrack { track_index: usize },
+    SearchSpotifyTrack {
+        track_index: usize,
+        query: String,
+    },
+    DownloadSpotifyTrack {
+        track_index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,8 +177,12 @@ impl App {
             }
             AppEvent::SearchResult(result) => {
                 self.search_results.push(result);
-                self.status = format!("{} results from {} users", 
-                    self.search_results.iter().map(|r| r.files.len()).sum::<usize>(),
+                self.status = format!(
+                    "{} results from {} users",
+                    self.search_results
+                        .iter()
+                        .map(|r| r.files.len())
+                        .sum::<usize>(),
                     self.search_results.len()
                 );
             }
@@ -161,8 +198,17 @@ impl App {
             AppEvent::Error(err) => {
                 self.status = format!("Error: {err}");
             }
-            AppEvent::DownloadQueued { id, username, filename, size } => {
-                let name = filename.rsplit(['/', '\\']).next().unwrap_or(&filename).to_string();
+            AppEvent::DownloadQueued {
+                id,
+                username,
+                filename,
+                size,
+            } => {
+                let name = filename
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&filename)
+                    .to_string();
                 self.downloads.push(Download {
                     id,
                     username,
@@ -211,17 +257,24 @@ impl App {
             AppEvent::SpotifyTrackSearching { track_index } => {
                 self.spotify_searching_track = Some(track_index);
                 if let Some(playlist) = &self.spotify_playlist
-                    && let Some(track) = playlist.tracks.get(track_index) {
-                        self.status = format!(
-                            "Searching [{}/{}]: {}",
-                            track_index + 1,
-                            playlist.tracks.len(),
-                            track.spotify_track.display_name()
-                        );
-                    }
+                    && let Some(track) = playlist.tracks.get(track_index)
+                {
+                    self.status = format!(
+                        "Searching [{}/{}]: {}",
+                        track_index + 1,
+                        playlist.tracks.len(),
+                        track.spotify_track.display_name()
+                    );
+                }
             }
-            AppEvent::SpotifyTrackMatched { track_index } => {
-                if let Some(playlist) = &self.spotify_playlist {
+            AppEvent::SpotifyTrackMatched {
+                track_index,
+                matched_file,
+            } => {
+                if let Some(playlist) = &mut self.spotify_playlist {
+                    if let Some(track) = playlist.tracks.get_mut(track_index) {
+                        track.matched_file = Some(matched_file);
+                    }
                     self.status = format!(
                         "Matched [{}/{}] - {} of {} found",
                         track_index + 1,
@@ -264,7 +317,9 @@ impl App {
                         self.search_results.clear();
                         self.selected_result = 0;
                         self.status = format!("Searching for '{}'...", self.search_input);
-                        let _ = self.cmd_tx.send(ClientCommand::Search(self.search_input.clone()));
+                        let _ = self
+                            .cmd_tx
+                            .send(ClientCommand::Search(self.search_input.clone()));
                     }
                 }
             }
@@ -274,6 +329,18 @@ impl App {
             KeyCode::Char(c) => {
                 self.search_input.insert(self.cursor_position, c);
                 self.cursor_position += 1;
+            }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.cursor_position > 0 {
+                    let text = &self.search_input[..self.cursor_position];
+                    let new_pos = text
+                        .trim_end()
+                        .rfind(|c: char| c.is_whitespace())
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    self.search_input.drain(new_pos..self.cursor_position);
+                    self.cursor_position = new_pos;
+                }
             }
             KeyCode::Backspace => {
                 if self.cursor_position > 0 {
@@ -303,7 +370,9 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('/') | KeyCode::Char('s') if self.focus != Focus::Files && self.focus != Focus::Playlist => {
+            KeyCode::Char('/') | KeyCode::Char('s')
+                if self.focus != Focus::Files && self.focus != Focus::Playlist =>
+            {
                 self.focus = Focus::Search;
                 self.input_mode = InputMode::Editing;
             }
@@ -314,7 +383,9 @@ impl App {
                             Focus::Playlist
                         } else if !self.downloads.is_empty() {
                             Focus::Downloads
-                        } else if self.current_user_files.is_some() || self.current_search_files.is_some() {
+                        } else if self.current_user_files.is_some()
+                            || self.current_search_files.is_some()
+                        {
                             Focus::Files
                         } else {
                             Focus::Results
@@ -323,7 +394,8 @@ impl App {
                     Focus::Results => Focus::Search,
                     Focus::Files => Focus::Results,
                     Focus::Downloads => {
-                        if self.current_user_files.is_some() || self.current_search_files.is_some() {
+                        if self.current_user_files.is_some() || self.current_search_files.is_some()
+                        {
                             Focus::Files
                         } else {
                             Focus::Results
@@ -348,7 +420,8 @@ impl App {
                         }
                     }
                     Focus::Results => {
-                        if self.current_user_files.is_some() || self.current_search_files.is_some() {
+                        if self.current_user_files.is_some() || self.current_search_files.is_some()
+                        {
                             Focus::Files
                         } else if !self.downloads.is_empty() {
                             Focus::Downloads
@@ -387,8 +460,12 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => self.move_selection(10),
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.move_selection(-10),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(10)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(-10)
+            }
             KeyCode::PageDown => self.move_selection(20),
             KeyCode::PageUp => self.move_selection(-20),
             KeyCode::Char('g') => self.jump_to_start(),
@@ -404,7 +481,11 @@ impl App {
                     self.focus = Focus::Files;
                     self.selected_file = 0;
                     self.file_scroll = 0;
-                    self.status = format!("Showing {} matching files from {}", result.files.len(), username);
+                    self.status = format!(
+                        "Showing {} matching files from {}",
+                        result.files.len(),
+                        username
+                    );
                 }
             }
             KeyCode::Char('d') if self.focus == Focus::Files => {
@@ -441,12 +522,13 @@ impl App {
 
     fn search_selected_playlist_track(&mut self) {
         if let Some(playlist) = &self.spotify_playlist
-            && let Some(track) = playlist.tracks.get(self.selected_playlist_track) {
-                let _ = self.cmd_tx.send(ClientCommand::SearchSpotifyTrack {
-                    track_index: self.selected_playlist_track,
-                    query: track.search_query.clone(),
-                });
-            }
+            && let Some(track) = playlist.tracks.get(self.selected_playlist_track)
+        {
+            let _ = self.cmd_tx.send(ClientCommand::SearchSpotifyTrack {
+                track_index: self.selected_playlist_track,
+                query: track.search_query.clone(),
+            });
+        }
     }
 
     fn search_all_playlist_tracks(&mut self) {
@@ -459,19 +541,26 @@ impl App {
                     });
                 }
             }
-            self.status = format!("Searching for {} unmatched tracks...", playlist.unmatched_tracks().count());
+            self.status = format!(
+                "Searching for {} unmatched tracks...",
+                playlist.unmatched_tracks().count()
+            );
         }
     }
 
     fn download_all_matched_tracks(&mut self) {
         if let Some(playlist) = &self.spotify_playlist {
-            let matched: Vec<_> = playlist.tracks.iter()
+            let matched: Vec<_> = playlist
+                .tracks
+                .iter()
                 .enumerate()
                 .filter(|(_, t)| t.matched_file.is_some())
                 .collect();
-            
+
             for (i, _) in &matched {
-                let _ = self.cmd_tx.send(ClientCommand::DownloadSpotifyTrack { track_index: *i });
+                let _ = self
+                    .cmd_tx
+                    .send(ClientCommand::DownloadSpotifyTrack { track_index: *i });
             }
             self.status = format!("Queued {} matched tracks for download", matched.len());
         }
@@ -504,7 +593,8 @@ impl App {
                 if let Some(playlist) = &self.spotify_playlist {
                     let len = playlist.tracks.len();
                     if len > 0 {
-                        let new_pos = (self.selected_playlist_track as i32 + delta).clamp(0, len as i32 - 1);
+                        let new_pos =
+                            (self.selected_playlist_track as i32 + delta).clamp(0, len as i32 - 1);
                         self.selected_playlist_track = new_pos as usize;
                     }
                 }
@@ -543,9 +633,10 @@ impl App {
             }
             Focus::Playlist => {
                 if let Some(playlist) = &self.spotify_playlist
-                    && !playlist.tracks.is_empty() {
-                        self.selected_playlist_track = playlist.tracks.len() - 1;
-                    }
+                    && !playlist.tracks.is_empty()
+                {
+                    self.selected_playlist_track = playlist.tracks.len() - 1;
+                }
             }
             Focus::Search => {}
         }
