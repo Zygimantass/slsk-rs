@@ -889,14 +889,6 @@ async fn handle_peer_connection(
                             st.spotify_track_searches.contains_key(&token)
                         };
 
-                        let _ = event_tx.send(AppEvent::StatusMessage(format!(
-                            "Got {} results from {} (token={}, spotify={})",
-                            results.len(),
-                            result_user,
-                            token,
-                            is_spotify_search
-                        )));
-
                         if is_spotify_search {
                             accumulate_search_results(
                                 token,
