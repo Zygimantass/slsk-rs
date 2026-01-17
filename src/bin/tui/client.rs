@@ -648,8 +648,8 @@ async fn handle_server_response(
     response: ServerResponse,
     state: &Arc<Mutex<ClientState>>,
     event_tx: &mpsc::UnboundedSender<AppEvent>,
-    tx_to_server: &mpsc::UnboundedSender<BytesMut>,
-    listen_port: u16,
+    _tx_to_server: &mpsc::UnboundedSender<BytesMut>,
+    _listen_port: u16,
     search_timeout_tx: &mpsc::UnboundedSender<u32>,
 ) {
     match response {
