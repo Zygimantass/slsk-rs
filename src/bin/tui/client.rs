@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use slsk_rs::constants::{
@@ -25,6 +25,77 @@ use crate::app::{AppEvent, ClientCommand, SearchResult};
 use crate::spotify::{MatchedFile, SoulseekPlaylist, SpotifyClient, SpotifyResource};
 
 const SEARCH_AGGREGATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+const SEARCH_RATE_LIMIT_MAX: usize = 34;
+const SEARCH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(220);
+
+#[derive(Debug, Clone)]
+enum QueuedSearch {
+    Regular { query: String },
+    SpotifyTrack { track_index: usize, query: String },
+}
+
+#[derive(Debug)]
+struct SearchRateLimiter {
+    search_timestamps: VecDeque<Instant>,
+    queued_searches: VecDeque<QueuedSearch>,
+}
+
+impl SearchRateLimiter {
+    fn new() -> Self {
+        Self {
+            search_timestamps: VecDeque::new(),
+            queued_searches: VecDeque::new(),
+        }
+    }
+
+    fn prune_old_searches(&mut self) {
+        let cutoff = Instant::now() - SEARCH_RATE_LIMIT_WINDOW;
+        while let Some(&ts) = self.search_timestamps.front() {
+            if ts < cutoff {
+                self.search_timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn can_search(&mut self) -> bool {
+        self.prune_old_searches();
+        self.search_timestamps.len() < SEARCH_RATE_LIMIT_MAX
+    }
+
+    fn record_search(&mut self) {
+        self.search_timestamps.push_back(Instant::now());
+    }
+
+    fn time_until_next_slot(&mut self) -> Option<Duration> {
+        self.prune_old_searches();
+        if self.search_timestamps.len() < SEARCH_RATE_LIMIT_MAX {
+            return None;
+        }
+        self.search_timestamps
+            .front()
+            .map(|&ts| (ts + SEARCH_RATE_LIMIT_WINDOW).saturating_duration_since(Instant::now()))
+    }
+
+    fn searches_remaining(&mut self) -> usize {
+        self.prune_old_searches();
+        SEARCH_RATE_LIMIT_MAX.saturating_sub(self.search_timestamps.len())
+    }
+
+    fn queue_search(&mut self, search: QueuedSearch) {
+        self.queued_searches.push_back(search);
+    }
+
+    fn pop_queued(&mut self) -> Option<QueuedSearch> {
+        self.queued_searches.pop_front()
+    }
+
+    fn queued_count(&self) -> usize {
+        self.queued_searches.len()
+    }
+}
 
 #[derive(Debug, Clone)]
 struct AccumulatedResult {
@@ -62,6 +133,101 @@ struct ClientState {
     active_download_users: std::collections::HashSet<String>,
     spotify_playlist: Option<SoulseekPlaylist>,
     spotify_track_searches: HashMap<u32, PendingSpotifySearch>,
+    rate_limiter: SearchRateLimiter,
+}
+
+async fn execute_search(
+    search: QueuedSearch,
+    state: &Arc<Mutex<ClientState>>,
+    write_tx: &mpsc::UnboundedSender<BytesMut>,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    let token = next_token();
+    match search {
+        QueuedSearch::Regular { query } => {
+            {
+                let mut st = state.lock().await;
+                st.pending_searches.insert(token, query.clone());
+                st.rate_limiter.record_search();
+            }
+            let req = ServerRequest::FileSearch {
+                token,
+                query: query.clone(),
+            };
+            let mut buf = BytesMut::new();
+            req.write_message(&mut buf);
+            let _ = write_tx.send(buf);
+
+            let remaining = {
+                let mut st = state.lock().await;
+                st.rate_limiter.searches_remaining()
+            };
+            let _ = event_tx.send(AppEvent::StatusMessage(format!(
+                "Searching '{}' ({} searches remaining)",
+                query, remaining
+            )));
+        }
+        QueuedSearch::SpotifyTrack { track_index, query } => {
+            {
+                let mut st = state.lock().await;
+                st.pending_searches.insert(token, query.clone());
+                st.spotify_track_searches.insert(
+                    token,
+                    PendingSpotifySearch {
+                        track_index,
+                        results: Vec::new(),
+                    },
+                );
+                st.rate_limiter.record_search();
+            }
+            let _ = event_tx.send(AppEvent::SpotifyTrackSearching { track_index });
+            let req = ServerRequest::FileSearch {
+                token,
+                query: query.clone(),
+            };
+            let mut buf = BytesMut::new();
+            req.write_message(&mut buf);
+            let _ = write_tx.send(buf);
+
+            let remaining = {
+                let mut st = state.lock().await;
+                st.rate_limiter.searches_remaining()
+            };
+            let _ = event_tx.send(AppEvent::StatusMessage(format!(
+                "Searching track '{}' ({} searches remaining)",
+                query, remaining
+            )));
+        }
+    }
+}
+
+async fn try_execute_or_queue_search(
+    search: QueuedSearch,
+    state: &Arc<Mutex<ClientState>>,
+    write_tx: &mpsc::UnboundedSender<BytesMut>,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    rate_limit_tx: &mpsc::UnboundedSender<()>,
+) {
+    let (can_search, wait_time, queued_count) = {
+        let mut st = state.lock().await;
+        let can = st.rate_limiter.can_search();
+        let wait = st.rate_limiter.time_until_next_slot();
+        if !can {
+            st.rate_limiter.queue_search(search.clone());
+        }
+        (can, wait, st.rate_limiter.queued_count())
+    };
+
+    if can_search {
+        execute_search(search, state, write_tx, event_tx).await;
+    } else {
+        let wait_secs = wait_time.map(|d| d.as_secs()).unwrap_or(0);
+        let _ = event_tx.send(AppEvent::StatusMessage(format!(
+            "Rate limited! {} searches queued, next slot in {}s",
+            queued_count, wait_secs
+        )));
+        let _ = rate_limit_tx.send(());
+    }
 }
 
 pub async fn run_client(
@@ -164,10 +330,12 @@ pub async fn run_client(
         active_download_users: std::collections::HashSet::new(),
         spotify_playlist: None,
         spotify_track_searches: HashMap::new(),
+        rate_limiter: SearchRateLimiter::new(),
     }));
 
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (search_timeout_tx, mut search_timeout_rx) = mpsc::unbounded_channel::<u32>();
+    let (rate_limit_tx, mut rate_limit_rx) = mpsc::unbounded_channel::<()>();
     let (read_stream, mut write_stream) = stream.into_split();
 
     let state_for_listener = state.clone();
@@ -213,19 +381,19 @@ pub async fn run_client(
     let state_for_cmd = state.clone();
     let write_tx_for_cmd = write_tx.clone();
     let event_tx_for_cmd = event_tx.clone();
+    let rate_limit_tx_for_cmd = rate_limit_tx.clone();
     let cmd_handle = tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 ClientCommand::Search(query) => {
-                    let token = next_token();
-                    {
-                        let mut st = state_for_cmd.lock().await;
-                        st.pending_searches.insert(token, query.clone());
-                    }
-                    let req = ServerRequest::FileSearch { token, query };
-                    let mut buf = BytesMut::new();
-                    req.write_message(&mut buf);
-                    let _ = write_tx_for_cmd.send(buf);
+                    try_execute_or_queue_search(
+                        QueuedSearch::Regular { query },
+                        &state_for_cmd,
+                        &write_tx_for_cmd,
+                        &event_tx_for_cmd,
+                        &rate_limit_tx_for_cmd,
+                    )
+                    .await;
                 }
                 ClientCommand::BrowseUser(username) => {
                     {
@@ -295,27 +463,14 @@ pub async fn run_client(
                     });
                 }
                 ClientCommand::SearchSpotifyTrack { track_index, query } => {
-                    let token = next_token();
-                    {
-                        let mut st = state_for_cmd.lock().await;
-                        st.pending_searches.insert(token, query.clone());
-                        st.spotify_track_searches.insert(
-                            token,
-                            PendingSpotifySearch {
-                                track_index,
-                                results: Vec::new(),
-                            },
-                        );
-                    }
-                    let _ = event_tx_for_cmd.send(AppEvent::SpotifyTrackSearching { track_index });
-                    let _ = event_tx_for_cmd.send(AppEvent::StatusMessage(format!(
-                        "Sent search for '{}' with token {}",
-                        query, token
-                    )));
-                    let req = ServerRequest::FileSearch { token, query };
-                    let mut buf = BytesMut::new();
-                    req.write_message(&mut buf);
-                    let _ = write_tx_for_cmd.send(buf);
+                    try_execute_or_queue_search(
+                        QueuedSearch::SpotifyTrack { track_index, query },
+                        &state_for_cmd,
+                        &write_tx_for_cmd,
+                        &event_tx_for_cmd,
+                        &rate_limit_tx_for_cmd,
+                    )
+                    .await;
                 }
                 ClientCommand::DownloadSpotifyTrack { track_index } => {
                     let matched_file = {
@@ -416,6 +571,68 @@ pub async fn run_client(
                 ));
                 let mut st = state.lock().await;
                 finalize_search(token, &mut st, &event_tx);
+            }
+            Some(()) = rate_limit_rx.recv() => {
+                let wait_time = {
+                    let mut st = state.lock().await;
+                    st.rate_limiter.time_until_next_slot()
+                };
+
+                if let Some(wait) = wait_time {
+                    let state_clone = state.clone();
+                    let write_tx_clone = write_tx.clone();
+                    let event_tx_clone = event_tx.clone();
+                    let rate_limit_tx_clone = rate_limit_tx.clone();
+
+                    tokio::spawn(async move {
+                        tokio::time::sleep(wait + Duration::from_millis(100)).await;
+
+                        loop {
+                            let queued = {
+                                let mut st = state_clone.lock().await;
+                                if st.rate_limiter.can_search() {
+                                    st.rate_limiter.pop_queued()
+                                } else {
+                                    None
+                                }
+                            };
+
+                            match queued {
+                                Some(search) => {
+                                    execute_search(
+                                        search,
+                                        &state_clone,
+                                        &write_tx_clone,
+                                        &event_tx_clone,
+                                    ).await;
+
+                                    let (more_queued, can_continue) = {
+                                        let mut st = state_clone.lock().await;
+                                        (st.rate_limiter.queued_count() > 0, st.rate_limiter.can_search())
+                                    };
+
+                                    if !more_queued {
+                                        break;
+                                    }
+                                    if !can_continue {
+                                        let _ = rate_limit_tx_clone.send(());
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    let has_queued = {
+                                        let st = state_clone.lock().await;
+                                        st.rate_limiter.queued_count() > 0
+                                    };
+                                    if has_queued {
+                                        let _ = rate_limit_tx_clone.send(());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
             }
         }
     }
