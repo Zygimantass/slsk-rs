@@ -1164,16 +1164,24 @@ fn pick_best_file(results: &[AccumulatedResult]) -> Option<&AccumulatedResult> {
     }
 
     candidates.sort_by(|a, b| {
-        let a_bitrate = get_bitrate(&a.file.attributes).unwrap_or(0);
-        let b_bitrate = get_bitrate(&b.file.attributes).unwrap_or(0);
+        let a_bitrate_opt = get_bitrate(&a.file.attributes);
+        let b_bitrate_opt = get_bitrate(&b.file.attributes);
 
         let a_is_flac = a.file.filename.to_lowercase().ends_with(".flac");
         let b_is_flac = b.file.filename.to_lowercase().ends_with(".flac");
+
+        let a_has_bitrate = a_bitrate_opt.is_some() || a_is_flac;
+        let b_has_bitrate = b_bitrate_opt.is_some() || b_is_flac;
+        if a_has_bitrate != b_has_bitrate {
+            return b_has_bitrate.cmp(&a_has_bitrate);
+        }
 
         if a_is_flac != b_is_flac {
             return b_is_flac.cmp(&a_is_flac);
         }
 
+        let a_bitrate = a_bitrate_opt.unwrap_or(0);
+        let b_bitrate = b_bitrate_opt.unwrap_or(0);
         b_bitrate.cmp(&a_bitrate)
     });
 
