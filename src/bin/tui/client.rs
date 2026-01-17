@@ -257,16 +257,8 @@ pub async fn run_client(
 
     // Wait for login response before proceeding
     let mut read_buf = BytesMut::with_capacity(65536);
-    let _ = event_tx.send(AppEvent::StatusMessage(
-        "Waiting for login response...".to_string(),
-    ));
     loop {
         let n = stream.read_buf(&mut read_buf).await?;
-        let _ = event_tx.send(AppEvent::StatusMessage(format!(
-            "Read {} bytes, buf len={}",
-            n,
-            read_buf.len()
-        )));
         if n == 0 {
             return Err("Connection closed before login response".into());
         }
@@ -547,9 +539,6 @@ pub async fn run_client(
 
                     match read_server_message(&mut msg_buf) {
                         Ok(response) => {
-                            let _ = event_tx.send(AppEvent::StatusMessage(
-                                format!("Server msg: {:?}", std::mem::discriminant(&response))
-                            ));
                             handle_server_response(
                                 response,
                                 &state,
@@ -566,9 +555,6 @@ pub async fn run_client(
                 }
             }
             Some(token) = search_timeout_rx.recv() => {
-                let _ = event_tx.send(AppEvent::StatusMessage(
-                    format!("Timeout fired for token {}, finalizing...", token)
-                ));
                 let mut st = state.lock().await;
                 finalize_search(token, &mut st, &event_tx);
             }
