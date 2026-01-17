@@ -503,8 +503,58 @@ impl App {
             KeyCode::Char('D') if self.focus == Focus::Playlist => {
                 self.download_all_matched_tracks();
             }
+            KeyCode::Char('r') if self.focus == Focus::Downloads => {
+                self.retry_failed_download();
+            }
             _ => {}
         }
+    }
+
+    fn retry_failed_download(&mut self) {
+        if self.selected_download < self.downloads.len() {
+            let download = &self.downloads[self.selected_download];
+            if matches!(download.status, DownloadStatus::Failed(_)) {
+                let query = Self::filename_to_search_query(&download.filename);
+                self.search_input = query.clone();
+                self.cursor_position = query.len();
+                let _ = self.cmd_tx.send(ClientCommand::Search(query.clone()));
+                self.search_results.clear();
+                self.selected_result = 0;
+                self.focus = Focus::Results;
+                self.status = format!("Re-searching for: {}", query);
+            } else {
+                self.status = "Can only retry failed downloads".to_string();
+            }
+        }
+    }
+
+    fn filename_to_search_query(filename: &str) -> String {
+        let name = std::path::Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename);
+
+        name.replace(['_', '-', '.'], " ")
+            .split_whitespace()
+            .filter(|word| {
+                let lower = word.to_lowercase();
+                !matches!(
+                    lower.as_str(),
+                    "flac"
+                        | "mp3"
+                        | "wav"
+                        | "ogg"
+                        | "m4a"
+                        | "320"
+                        | "256"
+                        | "128"
+                        | "192"
+                        | "24bit"
+                        | "16bit"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn download_selected_file(&mut self) {
