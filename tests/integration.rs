@@ -3,18 +3,18 @@
 //! These tests require a .env file with SLSK_USERNAME and SLSK_PASSWORD.
 
 use bytes::BytesMut;
+use slsk_rs::MessageWrite;
 use slsk_rs::constants::{ConnectionType, TransferDirection, UserStatus};
-use slsk_rs::distributed::{read_distributed_message, write_distributed_message, DistributedMessage};
+use slsk_rs::distributed::{
+    DistributedMessage, read_distributed_message, write_distributed_message,
+};
 use slsk_rs::file::{FileOffset, FileTransferInit};
 use slsk_rs::peer::{
-    read_peer_message, FileAttribute, PeerMessage, SearchResultFile, SharedDirectory, SharedFile,
+    FileAttribute, PeerMessage, SearchResultFile, SharedDirectory, SharedFile, read_peer_message,
 };
-use slsk_rs::peer_init::{read_peer_init_message, write_peer_init_message, PeerInitMessage};
-use slsk_rs::protocol::{
-    login_hash, zlib_compress, zlib_decompress, ProtocolRead, ProtocolWrite,
-};
+use slsk_rs::peer_init::{PeerInitMessage, read_peer_init_message, write_peer_init_message};
+use slsk_rs::protocol::{ProtocolRead, ProtocolWrite, login_hash, zlib_compress, zlib_decompress};
 use slsk_rs::server::{ServerCode, ServerRequest, UserStats};
-use slsk_rs::MessageWrite;
 use std::net::Ipv4Addr;
 
 fn load_env() -> Option<(String, String)> {
@@ -79,10 +79,7 @@ mod protocol_primitives {
     fn test_string_roundtrip() {
         let mut buf = BytesMut::new();
         "hello world".write_to(&mut buf);
-        assert_eq!(
-            String::read_from(&mut buf.freeze()).unwrap(),
-            "hello world"
-        );
+        assert_eq!(String::read_from(&mut buf.freeze()).unwrap(), "hello world");
     }
 
     #[test]
@@ -724,10 +721,7 @@ mod constants {
 
     #[test]
     fn test_obfuscation_type_conversions() {
-        assert_eq!(
-            ObfuscationType::try_from(0).unwrap(),
-            ObfuscationType::None
-        );
+        assert_eq!(ObfuscationType::try_from(0).unwrap(), ObfuscationType::None);
         assert_eq!(
             ObfuscationType::try_from(1).unwrap(),
             ObfuscationType::Rotated
@@ -793,8 +787,14 @@ mod complex_structures {
             size: 5_000_000,
             extension: "mp3".to_string(),
             attributes: vec![
-                FileAttribute { code: 0, value: 320 },
-                FileAttribute { code: 1, value: 180 },
+                FileAttribute {
+                    code: 0,
+                    value: 320,
+                },
+                FileAttribute {
+                    code: 1,
+                    value: 180,
+                },
             ],
         };
         let mut buf = BytesMut::new();
@@ -842,8 +842,14 @@ mod complex_structures {
             size: 10_000_000,
             extension: "mp3".to_string(),
             attributes: vec![
-                FileAttribute { code: 0, value: 256 },
-                FileAttribute { code: 1, value: 300 },
+                FileAttribute {
+                    code: 0,
+                    value: 256,
+                },
+                FileAttribute {
+                    code: 1,
+                    value: 300,
+                },
             ],
         };
         let mut buf = BytesMut::new();

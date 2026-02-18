@@ -260,8 +260,8 @@ impl ProtocolWrite for Ipv4Addr {
 
 /// Compress data using zlib.
 pub fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
-    use flate2::write::ZlibEncoder;
     use flate2::Compression;
+    use flate2::write::ZlibEncoder;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder

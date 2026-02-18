@@ -6,8 +6,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::constants::{TransferDirection, TransferRejectionReason, UploadPermission};
 use crate::protocol::{
-    read_list, write_list, zlib_compress, zlib_decompress, MessageRead, MessageWrite, ProtocolRead,
-    ProtocolWrite,
+    MessageRead, MessageWrite, ProtocolRead, ProtocolWrite, read_list, write_list, zlib_compress,
+    zlib_decompress,
 };
 use crate::{Error, Result};
 

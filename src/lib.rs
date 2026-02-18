@@ -6,14 +6,15 @@
 //! for server, peer, file transfer, and distributed network communication.
 
 pub mod constants;
+pub mod db;
 pub mod error;
 pub mod protocol;
 
-pub mod server;
-pub mod peer_init;
-pub mod peer;
-pub mod file;
 pub mod distributed;
+pub mod file;
+pub mod peer;
+pub mod peer_init;
+pub mod server;
 
 pub use error::{Error, Result};
 pub use protocol::{MessageRead, MessageWrite, ProtocolRead, ProtocolWrite};

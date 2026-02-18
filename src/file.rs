@@ -4,8 +4,8 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::protocol::{ProtocolRead, ProtocolWrite};
 use crate::Result;
+use crate::protocol::{ProtocolRead, ProtocolWrite};
 
 /// File transfer initialization.
 ///

@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    
+
     let mut app = App::new(cmd_tx);
 
     let client_handle = tokio::spawn(async move {

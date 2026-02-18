@@ -112,10 +112,9 @@ impl SpotifyClient {
     }
 
     pub fn from_env() -> Result<Self> {
-        let client_id = std::env::var("SPOTIFY_CLIENT_ID")
-            .context("SPOTIFY_CLIENT_ID not set")?;
-        let client_secret = std::env::var("SPOTIFY_CLIENT_SECRET")
-            .context("SPOTIFY_CLIENT_SECRET not set")?;
+        let client_id = std::env::var("SPOTIFY_CLIENT_ID").context("SPOTIFY_CLIENT_ID not set")?;
+        let client_secret =
+            std::env::var("SPOTIFY_CLIENT_SECRET").context("SPOTIFY_CLIENT_SECRET not set")?;
         Ok(Self::new(client_id, client_secret))
     }
 
@@ -315,7 +314,10 @@ impl SoulseekPlaylist {
     }
 
     pub fn matched_count(&self) -> usize {
-        self.tracks.iter().filter(|t| t.matched_file.is_some()).count()
+        self.tracks
+            .iter()
+            .filter(|t| t.matched_file.is_some())
+            .count()
     }
 
     pub fn unmatched_tracks(&self) -> impl Iterator<Item = &SoulseekPlaylistTrack> {
@@ -353,7 +355,9 @@ mod tests {
         let result = SpotifyClient::parse_spotify_url(url);
         assert_eq!(
             result,
-            Some(SpotifyResource::Playlist("37i9dQZF1DXcBWIGoYBM5M".to_string()))
+            Some(SpotifyResource::Playlist(
+                "37i9dQZF1DXcBWIGoYBM5M".to_string()
+            ))
         );
     }
 
@@ -373,7 +377,9 @@ mod tests {
         let result = SpotifyClient::parse_spotify_url(uri);
         assert_eq!(
             result,
-            Some(SpotifyResource::Playlist("37i9dQZF1DXcBWIGoYBM5M".to_string()))
+            Some(SpotifyResource::Playlist(
+                "37i9dQZF1DXcBWIGoYBM5M".to_string()
+            ))
         );
     }
 

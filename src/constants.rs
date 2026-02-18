@@ -81,7 +81,10 @@ impl TryFrom<u32> for UploadPermission {
             1 => Ok(UploadPermission::Everyone),
             2 => Ok(UploadPermission::UsersInList),
             3 => Ok(UploadPermission::PermittedUsers),
-            _ => Err(Error::Protocol(format!("Invalid upload permission: {}", value))),
+            _ => Err(Error::Protocol(format!(
+                "Invalid upload permission: {}",
+                value
+            ))),
         }
     }
 }
@@ -143,7 +146,10 @@ impl TryFrom<u32> for FileAttributeType {
             3 => Ok(FileAttributeType::Encoder),
             4 => Ok(FileAttributeType::SampleRate),
             5 => Ok(FileAttributeType::BitDepth),
-            _ => Err(Error::Protocol(format!("Unknown file attribute type: {}", value))),
+            _ => Err(Error::Protocol(format!(
+                "Unknown file attribute type: {}",
+                value
+            ))),
         }
     }
 }
@@ -164,7 +170,10 @@ impl TryFrom<u32> for ObfuscationType {
         match value {
             0 => Ok(ObfuscationType::None),
             1 => Ok(ObfuscationType::Rotated),
-            _ => Err(Error::Protocol(format!("Unknown obfuscation type: {}", value))),
+            _ => Err(Error::Protocol(format!(
+                "Unknown obfuscation type: {}",
+                value
+            ))),
         }
     }
 }

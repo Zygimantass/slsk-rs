@@ -215,7 +215,9 @@ mod tests {
 
         let parsed = read_peer_init_message(&mut buf).unwrap();
         match parsed {
-            PeerInitMessage::PeerInit { username, token, .. } => {
+            PeerInitMessage::PeerInit {
+                username, token, ..
+            } => {
                 assert_eq!(username, "testuser");
                 assert_eq!(token, 42);
             }

@@ -9,6 +9,7 @@ use bytes::BytesMut;
 use slsk_rs::constants::{
     ConnectionType, DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT, TransferDirection,
 };
+use slsk_rs::db::Database;
 use slsk_rs::file::{FileOffset, FileTransferInit};
 use slsk_rs::peer::{PeerMessage, SearchResultFile, SharedDirectory, read_peer_message};
 use slsk_rs::peer_init::{
@@ -33,6 +34,7 @@ const SEARCH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(220);
 enum QueuedSearch {
     Regular { query: String },
     SpotifyTrack { track_index: usize, query: String },
+    RetryDownload { download_id: u32, original_filename: String, query: String },
 }
 
 #[derive(Debug)]
@@ -109,6 +111,14 @@ struct PendingSpotifySearch {
     results: Vec<AccumulatedResult>,
 }
 
+#[derive(Debug)]
+struct PendingRetrySearch {
+    download_id: u32,
+    #[allow(dead_code)]
+    original_filename: String,
+    results: Vec<AccumulatedResult>,
+}
+
 static TOKEN_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 fn next_token() -> u32 {
@@ -133,6 +143,7 @@ struct ClientState {
     active_download_users: std::collections::HashSet<String>,
     spotify_playlist: Option<SoulseekPlaylist>,
     spotify_track_searches: HashMap<u32, PendingSpotifySearch>,
+    retry_searches: HashMap<u32, PendingRetrySearch>,
     rate_limiter: SearchRateLimiter,
 }
 
@@ -198,6 +209,37 @@ async fn execute_search(
                 query, remaining
             )));
         }
+        QueuedSearch::RetryDownload { download_id, original_filename, query } => {
+            {
+                let mut st = state.lock().await;
+                st.pending_searches.insert(token, query.clone());
+                st.retry_searches.insert(
+                    token,
+                    PendingRetrySearch {
+                        download_id,
+                        original_filename,
+                        results: Vec::new(),
+                    },
+                );
+                st.rate_limiter.record_search();
+            }
+            let req = ServerRequest::FileSearch {
+                token,
+                query: query.clone(),
+            };
+            let mut buf = BytesMut::new();
+            req.write_message(&mut buf);
+            let _ = write_tx.send(buf);
+
+            let remaining = {
+                let mut st = state.lock().await;
+                st.rate_limiter.searches_remaining()
+            };
+            let _ = event_tx.send(AppEvent::StatusMessage(format!(
+                "Searching alternative '{}' ({} remaining)",
+                query, remaining
+            )));
+        }
     }
 }
 
@@ -230,6 +272,25 @@ async fn try_execute_or_queue_search(
     }
 }
 
+fn filename_to_search_query(filename: &str) -> String {
+    let name = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+
+    name.replace(['_', '-', '.'], " ")
+        .split_whitespace()
+        .filter(|word| {
+            let lower = word.to_lowercase();
+            !matches!(
+                lower.as_str(),
+                "flac" | "mp3" | "wav" | "ogg" | "m4a" | "320" | "256" | "128" | "192" | "24bit" | "16bit"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub async fn run_client(
     username: &str,
     password: &str,
@@ -239,7 +300,13 @@ pub async fn run_client(
     let listener = TcpListener::bind("0.0.0.0:0").await?;
     let listen_port = listener.local_addr()?.port();
 
-    let mut stream = TcpStream::connect((DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT)).await?;
+    let server_host =
+        std::env::var("SOULSEEK_SERVER").unwrap_or_else(|_| DEFAULT_SERVER_HOST.to_string());
+    let server_port: u16 = std::env::var("SOULSEEK_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_SERVER_PORT);
+    let mut stream = TcpStream::connect((&*server_host, server_port)).await?;
     stream.set_nodelay(true)?;
     let _ = event_tx.send(AppEvent::Connected);
 
@@ -271,12 +338,10 @@ pub async fn run_client(
                 let mut msg_buf = read_buf.split_to(4 + msg_len);
 
                 match read_server_message(&mut msg_buf) {
-                    Ok(ServerResponse::LoginSuccess { greet, .. }) => {
+                    Ok(ServerResponse::LoginSuccess { .. }) => {
                         let _ = event_tx.send(AppEvent::LoginSuccess {
                             username: username.to_string(),
                         });
-                        let _ =
-                            event_tx.send(AppEvent::StatusMessage(format!("Logged in: {}", greet)));
                         break;
                     }
                     Ok(ServerResponse::LoginFailure { reason, detail }) => {
@@ -322,6 +387,7 @@ pub async fn run_client(
         active_download_users: std::collections::HashSet::new(),
         spotify_playlist: None,
         spotify_track_searches: HashMap::new(),
+        retry_searches: HashMap::new(),
         rate_limiter: SearchRateLimiter::new(),
     }));
 
@@ -511,6 +577,56 @@ pub async fn run_client(
                         }
                     }
                 }
+                ClientCommand::RetryDownload {
+                    download_id,
+                    original_filename,
+                } => {
+                    let query = filename_to_search_query(&original_filename);
+                    try_execute_or_queue_search(
+                        QueuedSearch::RetryDownload {
+                            download_id,
+                            original_filename,
+                            query,
+                        },
+                        &state_for_cmd,
+                        &write_tx_for_cmd,
+                        &event_tx_for_cmd,
+                        &rate_limit_tx_for_cmd,
+                    )
+                    .await;
+                }
+                ClientCommand::RetryDownloadFile {
+                    download_id,
+                    username,
+                    filename,
+                    size,
+                } => {
+                    let transfer_token = next_token();
+
+                    let download = PendingDownload {
+                        id: download_id,
+                        username: username.clone(),
+                        filename: filename.clone(),
+                        size,
+                        token: transfer_token,
+                    };
+
+                    let should_request_address = {
+                        let mut st = state_for_cmd.lock().await;
+                        st.pending_downloads
+                            .entry(username.clone())
+                            .or_default()
+                            .push(download);
+                        !st.active_download_users.contains(&username)
+                    };
+
+                    if should_request_address {
+                        let req = ServerRequest::GetPeerAddress { username };
+                        let mut buf = BytesMut::new();
+                        req.write_message(&mut buf);
+                        let _ = write_tx_for_cmd.send(buf);
+                    }
+                }
             }
         }
     });
@@ -557,6 +673,7 @@ pub async fn run_client(
             Some(token) = search_timeout_rx.recv() => {
                 let mut st = state.lock().await;
                 finalize_search(token, &mut st, &event_tx);
+                finalize_retry_search(token, &mut st, &event_tx);
             }
             Some(()) = rate_limit_rx.recv() => {
                 let wait_time = {
@@ -733,17 +850,12 @@ async fn handle_server_response(
             ..
         } => {
             if connection_type == ConnectionType::Peer {
-                let _ = event_tx.send(AppEvent::StatusMessage(format!(
-                    "ConnectToPeer: {} at {}:{}",
-                    username, ip, port
-                )));
-
                 let state_clone = state.clone();
                 let event_tx_clone = event_tx.clone();
                 let search_timeout_tx_clone = search_timeout_tx.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_peer_connection(
+                    let _ = handle_peer_connection(
                         &username,
                         ip,
                         port,
@@ -752,21 +864,9 @@ async fn handle_server_response(
                         &event_tx_clone,
                         &search_timeout_tx_clone,
                     )
-                    .await
-                    {
-                        let _ = event_tx_clone.send(AppEvent::Error(format!(
-                            "Peer connection to {username} failed: {e}"
-                        )));
-                    }
+                    .await;
                 });
             }
-        }
-        ServerResponse::FileSearch {
-            username, query, ..
-        } => {
-            let _ = event_tx.send(AppEvent::StatusMessage(format!(
-                "Search request from {username}: {query}"
-            )));
         }
         _ => {}
     }
@@ -884,13 +984,26 @@ async fn handle_peer_connection(
                     };
 
                     if pending && !results.is_empty() {
-                        let is_spotify_search = {
+                        let (is_spotify_search, is_retry_search) = {
                             let st = state.lock().await;
-                            st.spotify_track_searches.contains_key(&token)
+                            (
+                                st.spotify_track_searches.contains_key(&token),
+                                st.retry_searches.contains_key(&token),
+                            )
                         };
 
                         if is_spotify_search {
                             accumulate_search_results(
+                                token,
+                                &result_user,
+                                results,
+                                state,
+                                event_tx,
+                                search_timeout_tx,
+                            )
+                            .await;
+                        } else if is_retry_search {
+                            accumulate_retry_results(
                                 token,
                                 &result_user,
                                 results,
@@ -1176,11 +1289,6 @@ async fn accumulate_search_results(
 ) {
     let should_start_timer = {
         let mut st = state.lock().await;
-        let known_tokens: Vec<_> = st.spotify_track_searches.keys().copied().collect();
-        let _ = event_tx.send(AppEvent::StatusMessage(format!(
-            "accumulate: token={}, known tokens={:?}",
-            token, known_tokens
-        )));
         if let Some(pending) = st.spotify_track_searches.get_mut(&token) {
             let was_empty = pending.results.is_empty();
             for file in results {
@@ -1191,10 +1299,6 @@ async fn accumulate_search_results(
             }
             was_empty
         } else {
-            let _ = event_tx.send(AppEvent::StatusMessage(format!(
-                "Token {} not found in spotify_track_searches!",
-                token
-            )));
             false
         }
     };
@@ -1253,6 +1357,71 @@ fn finalize_search(
                 track_index + 1,
                 result_count
             )));
+        }
+
+        state.pending_searches.remove(&token);
+    }
+}
+
+async fn accumulate_retry_results(
+    token: u32,
+    username: &str,
+    results: Vec<SearchResultFile>,
+    state: &Arc<Mutex<ClientState>>,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    search_timeout_tx: &mpsc::UnboundedSender<u32>,
+) {
+    let should_start_timer = {
+        let mut st = state.lock().await;
+        if let Some(pending) = st.retry_searches.get_mut(&token) {
+            let was_empty = pending.results.is_empty();
+            for file in results {
+                pending.results.push(AccumulatedResult {
+                    username: username.to_string(),
+                    file,
+                });
+            }
+            was_empty
+        } else {
+            false
+        }
+    };
+
+    if should_start_timer {
+        let tx = search_timeout_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SEARCH_AGGREGATION_TIMEOUT).await;
+            let _ = tx.send(token);
+        });
+
+        let _ = event_tx.send(AppEvent::StatusMessage(
+            "Finding alternative sources...".to_string(),
+        ));
+    }
+}
+
+fn finalize_retry_search(
+    token: u32,
+    state: &mut ClientState,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    if let Some(pending) = state.retry_searches.remove(&token) {
+        let download_id = pending.download_id;
+
+        if let Some(best) = pick_best_file(&pending.results) {
+            let matched = MatchedFile {
+                username: best.username.clone(),
+                filename: best.file.filename.clone(),
+                size: best.file.size,
+                bitrate: get_bitrate(&best.file.attributes),
+            };
+
+            let _ = event_tx.send(AppEvent::RetryDownloadMatched {
+                download_id,
+                matched_file: matched,
+            });
+        } else {
+            let _ = event_tx.send(AppEvent::RetryDownloadFailed { download_id });
         }
 
         state.pending_searches.remove(&token);

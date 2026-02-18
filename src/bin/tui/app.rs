@@ -24,6 +24,8 @@ pub enum DownloadStatus {
     Failed(String),
 }
 
+const MAX_RETRY_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone)]
 pub struct Download {
     pub id: u32,
@@ -33,6 +35,8 @@ pub struct Download {
     pub size: u64,
     pub downloaded: u64,
     pub status: DownloadStatus,
+    pub retry_count: u32,
+    pub original_filename: String,
 }
 
 #[derive(Debug)]
@@ -77,6 +81,13 @@ pub enum AppEvent {
         track_index: usize,
         matched_file: MatchedFile,
     },
+    RetryDownloadMatched {
+        download_id: u32,
+        matched_file: MatchedFile,
+    },
+    RetryDownloadFailed {
+        download_id: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +107,16 @@ pub enum ClientCommand {
     },
     DownloadSpotifyTrack {
         track_index: usize,
+    },
+    RetryDownload {
+        download_id: u32,
+        original_filename: String,
+    },
+    RetryDownloadFile {
+        download_id: u32,
+        username: String,
+        filename: String,
+        size: u64,
     },
 }
 
@@ -216,6 +237,8 @@ impl App {
                     size,
                     downloaded: 0,
                     status: DownloadStatus::Queued,
+                    retry_count: 0,
+                    original_filename: filename,
                 });
                 self.status = format!("Queued: {}", name);
             }
@@ -239,8 +262,24 @@ impl App {
             }
             AppEvent::DownloadFailed { id, reason } => {
                 if let Some(dl) = self.downloads.iter_mut().find(|d| d.id == id) {
-                    dl.status = DownloadStatus::Failed(reason.clone());
-                    self.status = format!("Failed: {} - {}", dl.filename, reason);
+                    if dl.retry_count < MAX_RETRY_ATTEMPTS {
+                        dl.retry_count += 1;
+                        dl.status = DownloadStatus::Queued;
+                        dl.downloaded = 0;
+                        self.status = format!(
+                            "Retrying {} (attempt {}/{})",
+                            dl.filename,
+                            dl.retry_count + 1,
+                            MAX_RETRY_ATTEMPTS + 1
+                        );
+                        let _ = self.cmd_tx.send(ClientCommand::RetryDownload {
+                            download_id: id,
+                            original_filename: dl.original_filename.clone(),
+                        });
+                    } else {
+                        dl.status = DownloadStatus::Failed(reason.clone());
+                        self.status = format!("Failed after {} attempts: {}", MAX_RETRY_ATTEMPTS + 1, dl.filename);
+                    }
                 }
             }
             AppEvent::SpotifyLoaded(playlist) => {
@@ -284,6 +323,34 @@ impl App {
                     );
                 }
                 self.spotify_searching_track = None;
+            }
+            AppEvent::RetryDownloadMatched {
+                download_id,
+                matched_file,
+            } => {
+                if let Some(dl) = self.downloads.iter_mut().find(|d| d.id == download_id) {
+                    dl.username = matched_file.username.clone();
+                    dl.original_filename = matched_file.filename.clone();
+                    dl.size = matched_file.size;
+                    dl.filename = matched_file
+                        .filename
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(&matched_file.filename)
+                        .to_string();
+                    let _ = self.cmd_tx.send(ClientCommand::RetryDownloadFile {
+                        download_id,
+                        username: matched_file.username,
+                        filename: matched_file.filename,
+                        size: matched_file.size,
+                    });
+                }
+            }
+            AppEvent::RetryDownloadFailed { download_id } => {
+                if let Some(dl) = self.downloads.iter_mut().find(|d| d.id == download_id) {
+                    dl.status = DownloadStatus::Failed("No alternative sources found".to_string());
+                    self.status = format!("No alternatives found for: {}", dl.filename);
+                }
             }
         }
     }

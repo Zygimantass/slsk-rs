@@ -18,7 +18,10 @@ const TEXT: Color = Color::Rgb(230, 230, 230);
 const TEXT_DIM: Color = Color::Rgb(160, 160, 160);
 
 pub fn draw(f: &mut Frame, app: &App) {
-    f.render_widget(Block::default().style(Style::default().bg(SURFACE)), f.area());
+    f.render_widget(
+        Block::default().style(Style::default().bg(SURFACE)),
+        f.area(),
+    );
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -33,15 +36,16 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let main_area = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(outer[1])[1];
 
     let content = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(6),
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(6)])
         .split(main_area);
 
     draw_search_bar(f, app, content[0]);
@@ -49,7 +53,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let has_files = app.current_search_files.is_some() || app.current_user_files.is_some();
     let has_downloads = !app.downloads.is_empty();
     let has_playlist = app.spotify_playlist.is_some();
-    
+
     if has_playlist {
         if has_downloads {
             let panels = Layout::default()
@@ -64,7 +68,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if has_files && has_downloads {
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)])
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+            ])
             .split(content[1]);
 
         draw_results(f, app, panels[0]);
@@ -110,7 +118,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     let status_display = if app.status.len() as u16 > available_width {
         let truncate_at = available_width.saturating_sub(1) as usize;
-        format!("{}…", &app.status.chars().take(truncate_at).collect::<String>())
+        format!(
+            "{}…",
+            &app.status.chars().take(truncate_at).collect::<String>()
+        )
     } else {
         app.status.clone()
     };
@@ -259,7 +270,11 @@ fn draw_files(f: &mut Frame, app: &App, area: Rect) {
                     format!("{:.0} KB", file.size as f64 / 1024.0)
                 };
 
-                let path = file.filename.rsplit_once(['/', '\\']).map(|(p, _)| p).unwrap_or("");
+                let path = file
+                    .filename
+                    .rsplit_once(['/', '\\'])
+                    .map(|(p, _)| p)
+                    .unwrap_or("");
                 let path_display = if path.len() > 40 {
                     format!("...{}", &path[path.len().saturating_sub(37)..])
                 } else {
@@ -344,14 +359,14 @@ fn draw_files(f: &mut Frame, app: &App, area: Rect) {
 fn draw_downloads(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == Focus::Downloads;
     let border_color = if is_focused { ACCENT } else { DIM };
-    
+
     let items: Vec<ListItem> = app
         .downloads
         .iter()
         .enumerate()
         .map(|(i, dl)| {
             let is_selected = i == app.selected_download && is_focused;
-            
+
             let (status_char, status_color) = match &dl.status {
                 DownloadStatus::Queued => ("◌", WARNING),
                 DownloadStatus::Connecting => ("◐", ACCENT),
@@ -359,13 +374,13 @@ fn draw_downloads(f: &mut Frame, app: &App, area: Rect) {
                 DownloadStatus::Completed => ("●", SUCCESS),
                 DownloadStatus::Failed(_) => ("✕", Color::Rgb(239, 83, 80)),
             };
-            
+
             let progress = if dl.size > 0 {
                 (dl.downloaded as f64 / dl.size as f64 * 100.0) as u8
             } else {
                 0
             };
-            
+
             let progress_str = match &dl.status {
                 DownloadStatus::Completed => "done".to_string(),
                 DownloadStatus::Failed(_) => "failed".to_string(),
@@ -373,36 +388,43 @@ fn draw_downloads(f: &mut Frame, app: &App, area: Rect) {
                 DownloadStatus::Queued => "queued".to_string(),
                 DownloadStatus::Connecting => "connecting".to_string(),
             };
-            
+
             let spans = vec![
-                Span::styled(format!(" {} ", status_char), Style::default().fg(status_color)),
+                Span::styled(
+                    format!(" {} ", status_char),
+                    Style::default().fg(status_color),
+                ),
                 Span::styled(&dl.filename, Style::default().fg(TEXT)),
                 Span::styled(format!("  {}", progress_str), Style::default().fg(TEXT_DIM)),
             ];
-            
+
             let style = if is_selected {
                 Style::default().bg(SURFACE_BRIGHT)
             } else {
                 Style::default()
             };
-            
+
             ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
-    
-    let active = app.downloads.iter().filter(|d| matches!(d.status, DownloadStatus::Downloading)).count();
+
+    let active = app
+        .downloads
+        .iter()
+        .filter(|d| matches!(d.status, DownloadStatus::Downloading))
+        .count();
     let title = if active > 0 {
         format!(" Downloads ({} active) ", active)
     } else {
         format!(" Downloads ({}) ", app.downloads.len())
     };
-    
+
     let block = Block::default()
         .title(Span::styled(title, Style::default().fg(TEXT_DIM)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(SURFACE));
-    
+
     let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
@@ -410,11 +432,11 @@ fn draw_downloads(f: &mut Frame, app: &App, area: Rect) {
 fn draw_playlist(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == Focus::Playlist;
     let border_color = if is_focused { ACCENT } else { DIM };
-    
+
     let Some(playlist) = &app.spotify_playlist else {
         return;
     };
-    
+
     let items: Vec<ListItem> = playlist
         .tracks
         .iter()
@@ -422,7 +444,7 @@ fn draw_playlist(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, track)| {
             let is_selected = i == app.selected_playlist_track && is_focused;
             let is_searching = app.spotify_searching_track == Some(i);
-            
+
             let (status_char, status_color) = if track.matched_file.is_some() {
                 ("●", SUCCESS)
             } else if is_searching {
@@ -430,47 +452,51 @@ fn draw_playlist(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 ("○", DIM)
             };
-            
+
             let display = track.spotify_track.display_name();
             let display_truncated = if display.len() > 60 {
                 format!("{}...", &display[..57])
             } else {
                 display
             };
-            
+
             let mut spans = vec![
-                Span::styled(format!(" {} ", status_char), Style::default().fg(status_color)),
+                Span::styled(
+                    format!(" {} ", status_char),
+                    Style::default().fg(status_color),
+                ),
                 Span::styled(display_truncated, Style::default().fg(TEXT)),
             ];
-            
+
             if let Some(matched) = &track.matched_file
-                && let Some(bitrate) = matched.bitrate {
-                    spans.push(Span::styled(
-                        format!("  {}kbps", bitrate),
-                        Style::default().fg(TEXT_DIM),
-                    ));
-                }
-            
+                && let Some(bitrate) = matched.bitrate
+            {
+                spans.push(Span::styled(
+                    format!("  {}kbps", bitrate),
+                    Style::default().fg(TEXT_DIM),
+                ));
+            }
+
             let style = if is_selected {
                 Style::default().bg(SURFACE_BRIGHT)
             } else {
                 Style::default()
             };
-            
+
             ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
-    
+
     let matched = playlist.matched_count();
     let total = playlist.tracks.len();
     let title = format!(" {} ({}/{} matched) ", playlist.name, matched, total);
-    
+
     let block = Block::default()
         .title(Span::styled(title, Style::default().fg(TEXT_DIM)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(SURFACE));
-    
+
     let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
@@ -502,7 +528,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled("  ", Style::default()));
         }
         spans.push(Span::styled(*key, Style::default().fg(ACCENT)));
-        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(TEXT_DIM)));
+        spans.push(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(TEXT_DIM),
+        ));
     }
 
     let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE_BRIGHT));

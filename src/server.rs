@@ -6,7 +6,9 @@ use bytes::{Buf, BufMut};
 use std::net::Ipv4Addr;
 
 use crate::constants::{ConnectionType, LoginRejectionReason, ObfuscationType, UserStatus};
-use crate::protocol::{login_hash, read_list, write_list, MessageRead, MessageWrite, ProtocolRead, ProtocolWrite};
+use crate::protocol::{
+    MessageRead, MessageWrite, ProtocolRead, ProtocolWrite, login_hash, read_list, write_list,
+};
 use crate::{Error, Result};
 
 /// Server message codes.
@@ -353,7 +355,10 @@ pub enum ServerRequest {
     /// Remove a room operator.
     RemoveRoomOperator { room: String, username: String },
     /// Send message to multiple users.
-    MessageUsers { usernames: Vec<String>, message: String },
+    MessageUsers {
+        usernames: Vec<String>,
+        message: String,
+    },
     /// Join global room feed.
     JoinGlobalRoom,
     /// Leave global room feed.
@@ -728,7 +733,10 @@ pub enum ServerResponse {
     /// Our room operatorship was revoked.
     RoomOperatorshipRevoked { room: String },
     /// List of room operators.
-    RoomOperators { room: String, operators: Vec<String> },
+    RoomOperators {
+        room: String,
+        operators: Vec<String>,
+    },
     /// Room membership granted.
     RoomMembershipGranted { room: String },
     /// Room membership revoked.
@@ -776,7 +784,9 @@ impl MessageRead for ServerResponse {
                 } else {
                     let reason_str = String::read_from(buf)?;
                     let reason = LoginRejectionReason::from_string(reason_str.clone());
-                    let detail = if matches!(reason, LoginRejectionReason::InvalidUsername) && buf.has_remaining() {
+                    let detail = if matches!(reason, LoginRejectionReason::InvalidUsername)
+                        && buf.has_remaining()
+                    {
                         Some(String::read_from(buf)?)
                     } else {
                         None
@@ -1006,7 +1016,8 @@ impl MessageRead for ServerResponse {
 
                 let owned_names: Vec<String> = read_list(buf, String::read_from)?;
                 let owned_counts: Vec<u32> = read_list(buf, u32::read_from)?;
-                let owned_private_rooms: Vec<_> = owned_names.into_iter().zip(owned_counts).collect();
+                let owned_private_rooms: Vec<_> =
+                    owned_names.into_iter().zip(owned_counts).collect();
 
                 let private_names: Vec<String> = read_list(buf, String::read_from)?;
                 let private_counts: Vec<u32> = read_list(buf, u32::read_from)?;
@@ -1225,6 +1236,594 @@ pub fn read_server_message<B: Buf>(buf: &mut B) -> Result<ServerResponse> {
     let _len = u32::read_from(buf)?;
     let code = ServerCode::try_from(u32::read_from(buf)?)?;
     ServerResponse::read_with_code(code, buf)
+}
+
+/// Read a server request from a buffer (including length prefix).
+/// Used by server implementations to parse client messages.
+pub fn read_server_request<B: Buf>(buf: &mut B) -> Result<ServerRequest> {
+    let _len = u32::read_from(buf)?;
+    let code = ServerCode::try_from(u32::read_from(buf)?)?;
+    ServerRequest::read_with_code(code, buf)
+}
+
+impl MessageRead for ServerRequest {
+    type Code = ServerCode;
+
+    fn read_with_code<B: Buf>(code: ServerCode, buf: &mut B) -> Result<Self> {
+        match code {
+            ServerCode::Login => {
+                let username = String::read_from(buf)?;
+                let password = String::read_from(buf)?;
+                let version = u32::read_from(buf)?;
+                let _hash = String::read_from(buf)?; // MD5 hash, we don't need it
+                let minor_version = u32::read_from(buf)?;
+                Ok(ServerRequest::Login {
+                    username,
+                    password,
+                    version,
+                    minor_version,
+                })
+            }
+            ServerCode::SetWaitPort => {
+                let port = u32::read_from(buf)?;
+                let (obfuscation_type, obfuscated_port) = if buf.has_remaining() {
+                    let obs = ObfuscationType::try_from(u32::read_from(buf)?)?;
+                    let obs_port = u32::read_from(buf)?;
+                    (Some(obs), Some(obs_port))
+                } else {
+                    (None, None)
+                };
+                Ok(ServerRequest::SetWaitPort {
+                    port,
+                    obfuscation_type,
+                    obfuscated_port,
+                })
+            }
+            ServerCode::GetPeerAddress => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::GetPeerAddress { username })
+            }
+            ServerCode::WatchUser => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::WatchUser { username })
+            }
+            ServerCode::UnwatchUser => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::UnwatchUser { username })
+            }
+            ServerCode::GetUserStatus => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::GetUserStatus { username })
+            }
+            ServerCode::SayChatroom => {
+                let room = String::read_from(buf)?;
+                let message = String::read_from(buf)?;
+                Ok(ServerRequest::SayChatroom { room, message })
+            }
+            ServerCode::JoinRoom => {
+                let room = String::read_from(buf)?;
+                let private = if buf.has_remaining() {
+                    u32::read_from(buf)? != 0
+                } else {
+                    false
+                };
+                Ok(ServerRequest::JoinRoom { room, private })
+            }
+            ServerCode::LeaveRoom => {
+                let room = String::read_from(buf)?;
+                Ok(ServerRequest::LeaveRoom { room })
+            }
+            ServerCode::ConnectToPeer => {
+                let token = u32::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                let conn_type_str = String::read_from(buf)?;
+                let connection_type = ConnectionType::parse(&conn_type_str)?;
+                Ok(ServerRequest::ConnectToPeer {
+                    token,
+                    username,
+                    connection_type,
+                })
+            }
+            ServerCode::MessageUser => {
+                let username = String::read_from(buf)?;
+                let message = String::read_from(buf)?;
+                Ok(ServerRequest::MessageUser { username, message })
+            }
+            ServerCode::MessageAcked => {
+                let message_id = u32::read_from(buf)?;
+                Ok(ServerRequest::MessageAcked { message_id })
+            }
+            ServerCode::FileSearch => {
+                let token = u32::read_from(buf)?;
+                let query = String::read_from(buf)?;
+                Ok(ServerRequest::FileSearch { token, query })
+            }
+            ServerCode::SetStatus => {
+                let status_val = i32::read_from(buf)?;
+                let status = UserStatus::try_from(status_val as u32)?;
+                Ok(ServerRequest::SetStatus { status })
+            }
+            ServerCode::ServerPing => Ok(ServerRequest::ServerPing),
+            ServerCode::SharedFoldersFiles => {
+                let dirs = u32::read_from(buf)?;
+                let files = u32::read_from(buf)?;
+                Ok(ServerRequest::SharedFoldersFiles { dirs, files })
+            }
+            ServerCode::GetUserStats => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::GetUserStats { username })
+            }
+            ServerCode::UserSearch => {
+                let username = String::read_from(buf)?;
+                let token = u32::read_from(buf)?;
+                let query = String::read_from(buf)?;
+                Ok(ServerRequest::UserSearch {
+                    username,
+                    token,
+                    query,
+                })
+            }
+            ServerCode::InterestAdd => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::InterestAdd { item })
+            }
+            ServerCode::InterestRemove => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::InterestRemove { item })
+            }
+            ServerCode::GetRecommendations => Ok(ServerRequest::GetRecommendations),
+            ServerCode::GetGlobalRecommendations => Ok(ServerRequest::GetGlobalRecommendations),
+            ServerCode::GetUserInterests => {
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::GetUserInterests { username })
+            }
+            ServerCode::RoomList => Ok(ServerRequest::RoomList),
+            ServerCode::HaveNoParent => {
+                let no_parent = bool::read_from(buf)?;
+                Ok(ServerRequest::HaveNoParent { no_parent })
+            }
+            ServerCode::CheckPrivileges => Ok(ServerRequest::CheckPrivileges),
+            ServerCode::AcceptChildren => {
+                let accept = bool::read_from(buf)?;
+                Ok(ServerRequest::AcceptChildren { accept })
+            }
+            ServerCode::WishlistSearch => {
+                let token = u32::read_from(buf)?;
+                let query = String::read_from(buf)?;
+                Ok(ServerRequest::WishlistSearch { token, query })
+            }
+            ServerCode::GetSimilarUsers => Ok(ServerRequest::GetSimilarUsers),
+            ServerCode::GetItemRecommendations => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::GetItemRecommendations { item })
+            }
+            ServerCode::GetItemSimilarUsers => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::GetItemSimilarUsers { item })
+            }
+            ServerCode::RoomTickerSet => {
+                let room = String::read_from(buf)?;
+                let ticker = String::read_from(buf)?;
+                Ok(ServerRequest::RoomTickerSet { room, ticker })
+            }
+            ServerCode::HatedInterestAdd => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::HatedInterestAdd { item })
+            }
+            ServerCode::HatedInterestRemove => {
+                let item = String::read_from(buf)?;
+                Ok(ServerRequest::HatedInterestRemove { item })
+            }
+            ServerCode::RoomSearch => {
+                let room = String::read_from(buf)?;
+                let token = u32::read_from(buf)?;
+                let query = String::read_from(buf)?;
+                Ok(ServerRequest::RoomSearch { room, token, query })
+            }
+            ServerCode::SendUploadSpeed => {
+                let speed = u32::read_from(buf)?;
+                Ok(ServerRequest::SendUploadSpeed { speed })
+            }
+            ServerCode::GivePrivileges => {
+                let username = String::read_from(buf)?;
+                let days = u32::read_from(buf)?;
+                Ok(ServerRequest::GivePrivileges { username, days })
+            }
+            ServerCode::BranchLevel => {
+                let level = u32::read_from(buf)?;
+                Ok(ServerRequest::BranchLevel { level })
+            }
+            ServerCode::BranchRoot => {
+                let root = String::read_from(buf)?;
+                Ok(ServerRequest::BranchRoot { root })
+            }
+            ServerCode::AddRoomMember => {
+                let room = String::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::AddRoomMember { room, username })
+            }
+            ServerCode::RemoveRoomMember => {
+                let room = String::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::RemoveRoomMember { room, username })
+            }
+            ServerCode::CancelRoomMembership => {
+                let room = String::read_from(buf)?;
+                Ok(ServerRequest::CancelRoomMembership { room })
+            }
+            ServerCode::CancelRoomOwnership => {
+                let room = String::read_from(buf)?;
+                Ok(ServerRequest::CancelRoomOwnership { room })
+            }
+            ServerCode::EnableRoomInvitations => {
+                let enable = bool::read_from(buf)?;
+                Ok(ServerRequest::EnableRoomInvitations { enable })
+            }
+            ServerCode::ChangePassword => {
+                let password = String::read_from(buf)?;
+                Ok(ServerRequest::ChangePassword { password })
+            }
+            ServerCode::AddRoomOperator => {
+                let room = String::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::AddRoomOperator { room, username })
+            }
+            ServerCode::RemoveRoomOperator => {
+                let room = String::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::RemoveRoomOperator { room, username })
+            }
+            ServerCode::MessageUsers => {
+                let usernames = read_list(buf, String::read_from)?;
+                let message = String::read_from(buf)?;
+                Ok(ServerRequest::MessageUsers { usernames, message })
+            }
+            ServerCode::JoinGlobalRoom => Ok(ServerRequest::JoinGlobalRoom),
+            ServerCode::LeaveGlobalRoom => Ok(ServerRequest::LeaveGlobalRoom),
+            ServerCode::CantConnectToPeer => {
+                let token = u32::read_from(buf)?;
+                let username = String::read_from(buf)?;
+                Ok(ServerRequest::CantConnectToPeer { token, username })
+            }
+            // Response-only codes
+            _ => Err(Error::Protocol(format!(
+                "Server code {:?} is response-only, not expected in request",
+                code
+            ))),
+        }
+    }
+}
+
+impl MessageWrite for ServerResponse {
+    type Code = ServerCode;
+
+    fn code(&self) -> ServerCode {
+        match self {
+            ServerResponse::LoginSuccess { .. } => ServerCode::Login,
+            ServerResponse::LoginFailure { .. } => ServerCode::Login,
+            ServerResponse::GetPeerAddress { .. } => ServerCode::GetPeerAddress,
+            ServerResponse::WatchUser { .. } => ServerCode::WatchUser,
+            ServerResponse::GetUserStatus { .. } => ServerCode::GetUserStatus,
+            ServerResponse::SayChatroom { .. } => ServerCode::SayChatroom,
+            ServerResponse::JoinRoom { .. } => ServerCode::JoinRoom,
+            ServerResponse::LeaveRoom { .. } => ServerCode::LeaveRoom,
+            ServerResponse::UserJoinedRoom { .. } => ServerCode::UserJoinedRoom,
+            ServerResponse::UserLeftRoom { .. } => ServerCode::UserLeftRoom,
+            ServerResponse::ConnectToPeer { .. } => ServerCode::ConnectToPeer,
+            ServerResponse::MessageUser { .. } => ServerCode::MessageUser,
+            ServerResponse::FileSearch { .. } => ServerCode::FileSearch,
+            ServerResponse::GetUserStats { .. } => ServerCode::GetUserStats,
+            ServerResponse::Relogged => ServerCode::Relogged,
+            ServerResponse::Recommendations { .. } => ServerCode::GetRecommendations,
+            ServerResponse::GlobalRecommendations { .. } => ServerCode::GetGlobalRecommendations,
+            ServerResponse::UserInterests { .. } => ServerCode::GetUserInterests,
+            ServerResponse::RoomList { .. } => ServerCode::RoomList,
+            ServerResponse::AdminMessage { .. } => ServerCode::AdminMessage,
+            ServerResponse::PrivilegedUsers { .. } => ServerCode::PrivilegedUsers,
+            ServerResponse::ParentMinSpeed { .. } => ServerCode::ParentMinSpeed,
+            ServerResponse::ParentSpeedRatio { .. } => ServerCode::ParentSpeedRatio,
+            ServerResponse::CheckPrivileges { .. } => ServerCode::CheckPrivileges,
+            ServerResponse::EmbeddedMessage { .. } => ServerCode::EmbeddedMessage,
+            ServerResponse::PossibleParents { .. } => ServerCode::PossibleParents,
+            ServerResponse::WishlistInterval { .. } => ServerCode::WishlistInterval,
+            ServerResponse::SimilarUsers { .. } => ServerCode::GetSimilarUsers,
+            ServerResponse::ItemRecommendations { .. } => ServerCode::GetItemRecommendations,
+            ServerResponse::ItemSimilarUsers { .. } => ServerCode::GetItemSimilarUsers,
+            ServerResponse::RoomTickerState { .. } => ServerCode::RoomTickerState,
+            ServerResponse::RoomTickerAdd { .. } => ServerCode::RoomTickerAdd,
+            ServerResponse::RoomTickerRemove { .. } => ServerCode::RoomTickerRemove,
+            ServerResponse::EnableRoomInvitations { .. } => ServerCode::EnableRoomInvitations,
+            ServerResponse::ChangePassword { .. } => ServerCode::ChangePassword,
+            ServerResponse::AddRoomOperator { .. } => ServerCode::AddRoomOperator,
+            ServerResponse::RemoveRoomOperator { .. } => ServerCode::RemoveRoomOperator,
+            ServerResponse::RoomOperatorshipGranted { .. } => ServerCode::RoomOperatorshipGranted,
+            ServerResponse::RoomOperatorshipRevoked { .. } => ServerCode::RoomOperatorshipRevoked,
+            ServerResponse::RoomOperators { .. } => ServerCode::RoomOperators,
+            ServerResponse::RoomMembershipGranted { .. } => ServerCode::RoomMembershipGranted,
+            ServerResponse::RoomMembershipRevoked { .. } => ServerCode::RoomMembershipRevoked,
+            ServerResponse::RoomMembers { .. } => ServerCode::RoomMembers,
+            ServerResponse::AddRoomMember { .. } => ServerCode::AddRoomMember,
+            ServerResponse::RemoveRoomMember { .. } => ServerCode::RemoveRoomMember,
+            ServerResponse::ResetDistributed => ServerCode::ResetDistributed,
+            ServerResponse::GlobalRoomMessage { .. } => ServerCode::GlobalRoomMessage,
+            ServerResponse::ExcludedSearchPhrases { .. } => ServerCode::ExcludedSearchPhrases,
+            ServerResponse::CantConnectToPeer { .. } => ServerCode::CantConnectToPeer,
+            ServerResponse::CantCreateRoom { .. } => ServerCode::CantCreateRoom,
+        }
+    }
+
+    fn write_payload<B: BufMut>(&self, buf: &mut B) {
+        match self {
+            ServerResponse::LoginSuccess { greet, own_ip, password_hash, is_supporter } => {
+                true.write_to(buf);
+                greet.write_to(buf);
+                own_ip.write_to(buf);
+                password_hash.write_to(buf);
+                is_supporter.write_to(buf);
+            }
+            ServerResponse::LoginFailure { reason, detail } => {
+                false.write_to(buf);
+                match reason {
+                    LoginRejectionReason::InvalidUsername => "INVALIDUSERNAME".to_string().write_to(buf),
+                    LoginRejectionReason::EmptyPassword => "EMPTYPASSWORD".to_string().write_to(buf),
+                    LoginRejectionReason::InvalidPassword => "INVALIDPASS".to_string().write_to(buf),
+                    LoginRejectionReason::InvalidVersion => "INVALIDVERSION".to_string().write_to(buf),
+                    LoginRejectionReason::ServerFull => "SVRFULL".to_string().write_to(buf),
+                    LoginRejectionReason::ServerPrivate => "SVRPRIVATE".to_string().write_to(buf),
+                    LoginRejectionReason::Other(s) => s.write_to(buf),
+                }
+                if let Some(d) = detail {
+                    d.write_to(buf);
+                }
+            }
+            ServerResponse::GetPeerAddress { username, ip, port, obfuscation_type, obfuscated_port } => {
+                username.write_to(buf);
+                ip.write_to(buf);
+                port.write_to(buf);
+                (*obfuscation_type as u32).write_to(buf);
+                obfuscated_port.write_to(buf);
+            }
+            ServerResponse::WatchUser { username, exists, status, stats, country_code } => {
+                username.write_to(buf);
+                exists.write_to(buf);
+                if *exists {
+                    if let Some(s) = status {
+                        (*s as u32).write_to(buf);
+                    }
+                    if let Some(st) = stats {
+                        st.write_to(buf);
+                    }
+                    if let Some(cc) = country_code {
+                        cc.write_to(buf);
+                    }
+                }
+            }
+            ServerResponse::GetUserStatus { username, status, privileged } => {
+                username.write_to(buf);
+                (*status as u32).write_to(buf);
+                privileged.write_to(buf);
+            }
+            ServerResponse::SayChatroom { room, username, message } => {
+                room.write_to(buf);
+                username.write_to(buf);
+                message.write_to(buf);
+            }
+            ServerResponse::JoinRoom { room, users, owner, operators } => {
+                room.write_to(buf);
+                write_list(buf, users, |b, u| u.username.write_to(b));
+                write_list(buf, users, |b, u| (u.status as u32).write_to(b));
+                write_list(buf, users, |b, u| u.stats.write_to(b));
+                write_list(buf, users, |b, u| (u.slots_full as u32).write_to(b));
+                write_list(buf, users, |b, u| u.country_code.write_to(b));
+                if let Some(o) = owner {
+                    o.write_to(buf);
+                    write_list(buf, operators, |b, op| op.write_to(b));
+                }
+            }
+            ServerResponse::LeaveRoom { room } => {
+                room.write_to(buf);
+            }
+            ServerResponse::UserJoinedRoom { room, username, status, stats, slots_full, country_code } => {
+                room.write_to(buf);
+                username.write_to(buf);
+                (*status as u32).write_to(buf);
+                stats.write_to(buf);
+                (*slots_full as u32).write_to(buf);
+                country_code.write_to(buf);
+            }
+            ServerResponse::UserLeftRoom { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::ConnectToPeer { username, connection_type, ip, port, token, privileged, obfuscation_type, obfuscated_port } => {
+                username.write_to(buf);
+                connection_type.as_str().to_string().write_to(buf);
+                ip.write_to(buf);
+                port.write_to(buf);
+                token.write_to(buf);
+                privileged.write_to(buf);
+                (*obfuscation_type as u32).write_to(buf);
+                obfuscated_port.write_to(buf);
+            }
+            ServerResponse::MessageUser { id, timestamp, username, message, new_message } => {
+                id.write_to(buf);
+                timestamp.write_to(buf);
+                username.write_to(buf);
+                message.write_to(buf);
+                new_message.write_to(buf);
+            }
+            ServerResponse::FileSearch { username, token, query } => {
+                username.write_to(buf);
+                token.write_to(buf);
+                query.write_to(buf);
+            }
+            ServerResponse::GetUserStats { username, stats } => {
+                username.write_to(buf);
+                stats.write_to(buf);
+            }
+            ServerResponse::Relogged => {}
+            ServerResponse::Recommendations { recommendations, unrecommendations } => {
+                write_list(buf, recommendations, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+                write_list(buf, unrecommendations, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+            }
+            ServerResponse::GlobalRecommendations { recommendations, unrecommendations } => {
+                write_list(buf, recommendations, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+                write_list(buf, unrecommendations, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+            }
+            ServerResponse::UserInterests { username, likes, hates } => {
+                username.write_to(buf);
+                write_list(buf, likes, |b, l| l.write_to(b));
+                write_list(buf, hates, |b, h| h.write_to(b));
+            }
+            ServerResponse::RoomList { rooms, owned_private_rooms, private_rooms, operated_private_rooms } => {
+                write_list(buf, rooms, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+                write_list(buf, owned_private_rooms, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+                write_list(buf, private_rooms, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+                write_list(buf, operated_private_rooms, |b, name| name.write_to(b));
+            }
+            ServerResponse::AdminMessage { message } => {
+                message.write_to(buf);
+            }
+            ServerResponse::PrivilegedUsers { users } => {
+                write_list(buf, users, |b, u| u.write_to(b));
+            }
+            ServerResponse::ParentMinSpeed { speed } => {
+                speed.write_to(buf);
+            }
+            ServerResponse::ParentSpeedRatio { ratio } => {
+                ratio.write_to(buf);
+            }
+            ServerResponse::CheckPrivileges { time_left } => {
+                time_left.write_to(buf);
+            }
+            ServerResponse::EmbeddedMessage { code, data } => {
+                code.write_to(buf);
+                buf.put_slice(data);
+            }
+            ServerResponse::PossibleParents { parents } => {
+                write_list(buf, parents, |b, p| {
+                    p.username.write_to(b);
+                    p.ip.write_to(b);
+                    p.port.write_to(b);
+                });
+            }
+            ServerResponse::WishlistInterval { interval } => {
+                interval.write_to(buf);
+            }
+            ServerResponse::SimilarUsers { users } => {
+                write_list(buf, users, |b, (name, rating)| {
+                    name.write_to(b);
+                    rating.write_to(b);
+                });
+            }
+            ServerResponse::ItemRecommendations { item, recommendations } => {
+                item.write_to(buf);
+                write_list(buf, recommendations, |b, (name, count)| {
+                    name.write_to(b);
+                    count.write_to(b);
+                });
+            }
+            ServerResponse::ItemSimilarUsers { item, users } => {
+                item.write_to(buf);
+                write_list(buf, users, |b, u| u.write_to(b));
+            }
+            ServerResponse::RoomTickerState { room, tickers } => {
+                room.write_to(buf);
+                write_list(buf, tickers, |b, t| {
+                    t.username.write_to(b);
+                    t.ticker.write_to(b);
+                });
+            }
+            ServerResponse::RoomTickerAdd { room, username, ticker } => {
+                room.write_to(buf);
+                username.write_to(buf);
+                ticker.write_to(buf);
+            }
+            ServerResponse::RoomTickerRemove { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::EnableRoomInvitations { enable } => {
+                enable.write_to(buf);
+            }
+            ServerResponse::ChangePassword { password } => {
+                password.write_to(buf);
+            }
+            ServerResponse::AddRoomOperator { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::RemoveRoomOperator { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::RoomOperatorshipGranted { room } => {
+                room.write_to(buf);
+            }
+            ServerResponse::RoomOperatorshipRevoked { room } => {
+                room.write_to(buf);
+            }
+            ServerResponse::RoomOperators { room, operators } => {
+                room.write_to(buf);
+                write_list(buf, operators, |b, o| o.write_to(b));
+            }
+            ServerResponse::RoomMembershipGranted { room } => {
+                room.write_to(buf);
+            }
+            ServerResponse::RoomMembershipRevoked { room } => {
+                room.write_to(buf);
+            }
+            ServerResponse::RoomMembers { room, members } => {
+                room.write_to(buf);
+                write_list(buf, members, |b, m| m.write_to(b));
+            }
+            ServerResponse::AddRoomMember { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::RemoveRoomMember { room, username } => {
+                room.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::ResetDistributed => {}
+            ServerResponse::GlobalRoomMessage { room, username, message } => {
+                room.write_to(buf);
+                username.write_to(buf);
+                message.write_to(buf);
+            }
+            ServerResponse::ExcludedSearchPhrases { phrases } => {
+                write_list(buf, phrases, |b, p| p.write_to(b));
+            }
+            ServerResponse::CantConnectToPeer { token, username } => {
+                token.write_to(buf);
+                username.write_to(buf);
+            }
+            ServerResponse::CantCreateRoom { room } => {
+                room.write_to(buf);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
